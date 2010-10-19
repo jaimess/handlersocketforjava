@@ -27,6 +27,7 @@ HandlerSocketへの接続〜コマンド操作〜レスポンス解析〜切断 
 -- jp.ndca.handlersocket.HandlerSocketResult
 HandlerSocketのレスポンス結果を表現するBeanクラスです。
 
+
 -動作方法
 --テストクラスの動作
 　src/test/java
