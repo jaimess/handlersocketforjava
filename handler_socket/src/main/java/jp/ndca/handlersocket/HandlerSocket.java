@@ -1,19 +1,20 @@
 package jp.ndca.handlersocket;
 
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
 /**
  * MySQL pluginの一つであるHandlerSocket(http://github.com/ahiguti/HandlerSocket-Plugin-for-MySQL/)のJavaクライアント実装です。
@@ -22,6 +23,7 @@ import java.util.concurrent.LinkedBlockingQueue;
  *
  */
 public class HandlerSocket {
+	private static Log log = LogFactory.getLog(HandlerSocket.class);
 	private static final byte TOKEN_SEPARATOR = 0x09;
 	private static final byte COMMAND_TERMINATE = 0x0a;
 
@@ -33,8 +35,10 @@ public class HandlerSocket {
 	private int sendBufferSize = SOCKET_BUFFER_SIZE;
 	private int receiveBufferSize = SOCKET_BUFFER_SIZE;
 	private int executeBufferSize = EXECUTE_BUFFER_SIZE;
+	private boolean isBlocking = true;//Blockingモードで動作するかどうか。trueはBlocking/falseはNon-Blocking
 
-	Socket socket;
+//	Socket socket;
+	SocketChannel socket;
 	BlockingQueue<byte[]> commandBuffer;
 	Command command;
 	int currentResultSize = 0;//直前に実行されたコマンドのレスポンスデータサイズ
@@ -43,6 +47,11 @@ public class HandlerSocket {
 		super();
 		commandBuffer = new LinkedBlockingQueue<byte[]>();
 		command = new Command();
+	}
+	
+	public void clear(){
+		this.commandBuffer.clear();
+		this.currentResultSize = 0;
 	}
 	
 	public Command command(){
@@ -91,15 +100,20 @@ public class HandlerSocket {
 			close();
 		}
 		
-		socket = new Socket();
-		socket.setSendBufferSize(sendBufferSize);
-		socket.setReceiveBufferSize(receiveBufferSize);
-		socket.setSoTimeout(timeout);
-		
-		socket.connect(new InetSocketAddress(address, port));
+//		socket = new Socket();
+//		socket.setReceiveBufferSize(receiveBufferSize);
+//		socket.connect(new InetSocketAddress(address, port));
+//		socket.setSendBufferSize(sendBufferSize);
+//		socket.setSoTimeout(timeout);
+		socket = SocketChannel.open(new InetSocketAddress(address, port));
+		socket.configureBlocking(isBlocking);
+		socket.socket().setReceiveBufferSize(receiveBufferSize);
+		socket.socket().setSendBufferSize(sendBufferSize);
+		socket.socket().setSoTimeout(timeout);
+
 	}
 	
-	public List<HandlerSocketResult> execute() throws IOException{
+	public synchronized List<HandlerSocketResult> execute() throws IOException{
 		//TODO コマンドが一つもない場合の処理はどうするか？今回は何もしないでnullを返す。
 		if(commandBuffer.size() == 0)
 			return null;
@@ -110,35 +124,53 @@ public class HandlerSocket {
 		//TODO OutputStream数珠つなぎの影響で無駄なbufferコピーが発生してないか。調べて最適な形に。
 		//TODO 送受信途中でエラーが発生した場合どうすれば良いか。フェールセーフな方式の検討。
 		//TODO 一度に実行するコマンドの上限を設けるか？今は無制限。
-		DataOutputStream os = null;
 		try{
-			os = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream(), executeBufferSize));
-			while(true){
-				byte[] command = commandBuffer.poll();
-				if(command == null)
-					break;
-				os.write(command);
-			}
-			os.flush();
-		}finally{
-			
-		}
-		
-		DataInputStream is = null;
-		try{
-			is = new DataInputStream(new BufferedInputStream(socket.getInputStream(), executeBufferSize));
 			ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-			
-			byte[] b = new byte[executeBufferSize];
-			for(int size = 0 ; (size = is.read(b)) != -1 ; ){
+			int readSize = 0;
+			ByteBuffer b = ByteBuffer.allocate(executeBufferSize);
+			boolean writeComplete = false;
+			while(socket.isConnected()){
+				//read
+				b.clear();
+				//write
+				if(!writeComplete){
+					final ByteArrayOutputStream buf = new ByteArrayOutputStream();
+					for(byte[] command ; (command = commandBuffer.poll()) != null ; ){
+						buf.write(command);
+					}
+					writeComplete = true;
+//					new Thread(new Runnable(){
+//						@Override
+//						public void run() {
+//							try {
+								socket.write(ByteBuffer.wrap(buf.toByteArray()));
+//							} catch (IOException e) {
+//								e.printStackTrace();
+//							}
+//						}
+//					}).start();
+				}
+
+				int size = socket.read(b);
+				if(size < 0)
+					break;
+				if(size == 0)
+					continue;
 				currentResultSize += size;
-				buffer.write(b, 0, size);
+				readSize += size;
+				b.flip();
+				buffer.write(b.array(), 0, size);
 				if(size < executeBufferSize)
 					break;
 			}
 			
 			ResponseParser parser = new ResponseParser();
+			if(log.isDebugEnabled()){
+				log.debug(readSize + " / " + buffer.toByteArray().length);
+				log.debug(new String(buffer.toByteArray()));
+			}
 			results = parser.parse(buffer.toByteArray());
+
 		}finally{
 			
 		}
@@ -154,6 +186,49 @@ public class HandlerSocket {
 		socket.close();
 	}
 	
+	public int getTimeout() {
+		return timeout;
+	}
+
+	public void setTimeout(int timeout) {
+		this.timeout = timeout;
+	}
+
+	public int getSendBufferSize() {
+		return sendBufferSize;
+	}
+
+	public void setSendBufferSize(int sendBufferSize) {
+		this.sendBufferSize = sendBufferSize;
+	}
+
+	public int getReceiveBufferSize() {
+		return receiveBufferSize;
+	}
+
+	public void setReceiveBufferSize(int receiveBufferSize) {
+		this.receiveBufferSize = receiveBufferSize;
+	}
+
+	public int getExecuteBufferSize() {
+		return executeBufferSize;
+	}
+
+	public void setExecuteBufferSize(int executeBufferSize) {
+		this.executeBufferSize = executeBufferSize;
+	}
+
+	public boolean isBlocking() {
+		return isBlocking;
+	}
+
+	public void setBlocking(boolean isBlocking) {
+		this.isBlocking = isBlocking;
+	}
+
+
+
+
 	/**
 	 * HanlerSocketのコマンドを実行します。実行したコマンドはqueueに格納され、HanlerSocket#execute時にまとめて実行されます。
 	 * @author moaikids
