@@ -109,10 +109,10 @@ public class HandlerSocket {
 		selector = Selector.open();
 		socket = SocketChannel.open();
 		socket.configureBlocking(isBlocking);
-//		socket.socket().setReceiveBufferSize(receiveBufferSize);
-//		socket.socket().setSendBufferSize(sendBufferSize);
-//		socket.socket().setSoTimeout(timeout);
-//		socket.socket().setTcpNoDelay(tcpNoDelay);
+		socket.socket().setReceiveBufferSize(receiveBufferSize);
+		socket.socket().setSendBufferSize(sendBufferSize);
+		socket.socket().setSoTimeout(timeout);
+		socket.socket().setTcpNoDelay(tcpNoDelay);
 
 		socket.connect(new InetSocketAddress(address, port));
 		while(!socket.finishConnect()){}
