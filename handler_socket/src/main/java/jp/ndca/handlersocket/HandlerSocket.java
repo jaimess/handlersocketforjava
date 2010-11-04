@@ -31,10 +31,9 @@ public class HandlerSocket {
 	private static final byte COMMAND_TERMINATE = 0x0a;
 
 	private static final int SOCKET_TIMEOUT = 30 * 1000;
-	private static final int SOCKET_BUFFER_SIZE = 128 * 1024;
-	private static final int EXECUTE_BUFFER_SIZE = 128 * 1024;
+	private static final int SOCKET_BUFFER_SIZE = 8 * 1024;
+	private static final int EXECUTE_BUFFER_SIZE = 8 * 1024;
 	
-	private int readTimeout = SOCKET_TIMEOUT;
 	private int timeout = SOCKET_TIMEOUT;
 	private int sendBufferSize = SOCKET_BUFFER_SIZE;
 	private int receiveBufferSize = SOCKET_BUFFER_SIZE;
@@ -42,7 +41,6 @@ public class HandlerSocket {
 	private boolean isBlocking = false;//Blockingモードで動作するかどうか。trueはBlocking/falseはNon-Blocking
 	private boolean tcpNoDelay = true;
 
-//	Socket socket;
 	SocketChannel socket;
 	Selector selector;
 	BlockingQueue<byte[]> commandBuffer;
@@ -170,7 +168,7 @@ public class HandlerSocket {
 						ResponseParser parser = new ResponseParser();
 						if(log.isDebugEnabled()){
 							log.debug(readSize + " / " + buffer.toByteArray().length);
-			//				log.debug(new String(buffer.toByteArray()));
+							log.debug(new String(buffer.toByteArray()));
 						}
 						results = parser.parse(buffer.toByteArray());
 						
@@ -228,14 +226,6 @@ public class HandlerSocket {
 		this.executeBufferSize = executeBufferSize;
 	}
 
-	public boolean isBlocking() {
-		return isBlocking;
-	}
-
-	public void setBlocking(boolean isBlocking) {
-		this.isBlocking = isBlocking;
-	}
-
 	public boolean isTcpNoDelay() {
 		return tcpNoDelay;
 	}
@@ -243,9 +233,6 @@ public class HandlerSocket {
 	public void setTcpNoDelay(boolean tcpNoDelay) {
 		this.tcpNoDelay = tcpNoDelay;
 	}
-
-
-
 
 
 
