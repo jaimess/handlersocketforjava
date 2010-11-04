@@ -1,18 +1,17 @@
 package jp.ndca.handlersocket;
 
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -27,21 +26,25 @@ import org.apache.commons.logging.LogFactory;
  *
  */
 public class HandlerSocket {
-	private static final Log log = LogFactory.getLog(HandlerSocket.class);
+	private static Log log = LogFactory.getLog(HandlerSocket.class);
 	private static final byte TOKEN_SEPARATOR = 0x09;
 	private static final byte COMMAND_TERMINATE = 0x0a;
 
-	private static final int TIMEOUT = 30 * 1000;
-	private static final int SOCKET_BUFFER_SIZE = 8 * 1024;
-	private static final int EXECUTE_BUFFER_SIZE = 8 * 1024;
+	private static final int SOCKET_TIMEOUT = 30 * 1000;
+	private static final int SOCKET_BUFFER_SIZE = 128 * 1024;
+	private static final int EXECUTE_BUFFER_SIZE = 128 * 1024;
 	
-	private int readTimeout = TIMEOUT;
-	private int timeout = TIMEOUT;
+	private int readTimeout = SOCKET_TIMEOUT;
+	private int timeout = SOCKET_TIMEOUT;
 	private int sendBufferSize = SOCKET_BUFFER_SIZE;
 	private int receiveBufferSize = SOCKET_BUFFER_SIZE;
 	private int executeBufferSize = EXECUTE_BUFFER_SIZE;
+	private boolean isBlocking = false;//Blockingモードで動作するかどうか。trueはBlocking/falseはNon-Blocking
+	private boolean tcpNoDelay = true;
 
-	Socket socket;
+//	Socket socket;
+	SocketChannel socket;
+	Selector selector;
 	BlockingQueue<byte[]> commandBuffer;
 	Command command;
 	int currentResultSize = 0;//直前に実行されたコマンドのレスポンスデータサイズ
@@ -50,6 +53,11 @@ public class HandlerSocket {
 		super();
 		commandBuffer = new LinkedBlockingQueue<byte[]>();
 		command = new Command();
+	}
+	
+	public void clear(){
+		this.commandBuffer.clear();
+		this.currentResultSize = 0;
 	}
 	
 	public Command command(){
@@ -98,68 +106,81 @@ public class HandlerSocket {
 			close();
 		}
 		
-		socket = new Socket();
-		socket.setSendBufferSize(sendBufferSize);
-		socket.setReceiveBufferSize(receiveBufferSize);
-		socket.setSoTimeout(timeout);
-		socket.setTcpNoDelay(true);
-		
-		System.out.println(socket.getSendBufferSize() + "/" + socket.getReceiveBufferSize());
-		
-		socket.connect(new InetSocketAddress(address, port), readTimeout);
+		selector = Selector.open();
+		socket = SocketChannel.open();
+		socket.configureBlocking(isBlocking);
+//		socket.socket().setReceiveBufferSize(receiveBufferSize);
+//		socket.socket().setSendBufferSize(sendBufferSize);
+//		socket.socket().setSoTimeout(timeout);
+//		socket.socket().setTcpNoDelay(tcpNoDelay);
+
+		socket.connect(new InetSocketAddress(address, port));
+		while(!socket.finishConnect()){}
 	}
 	
-	public List<HandlerSocketResult> execute() throws IOException{
+	public synchronized List<HandlerSocketResult> execute() throws IOException{
 		//TODO コマンドが一つもない場合の処理はどうするか？今回は何もしないでnullを返す。
 		if(commandBuffer.size() == 0)
 			return null;
 		currentResultSize = 0;
 
+		socket.register(selector, socket.validOps());
 		List<HandlerSocketResult> results = new ArrayList<HandlerSocketResult>();
 		//TODO HandlerSocketとの送受信をすべてインラインで記述するか？ひとまずインラインで。
 		//TODO OutputStream数珠つなぎの影響で無駄なbufferコピーが発生してないか。調べて最適な形に。
 		//TODO 送受信途中でエラーが発生した場合どうすれば良いか。フェールセーフな方式の検討。
 		//TODO 一度に実行するコマンドの上限を設けるか？今は無制限。
-//		DataOutputStream os = null;
-		InputStream is = null;
 		try{
-			final ByteArrayOutputStream commands = new ByteArrayOutputStream();
-			for(byte[] command = null ; (command = commandBuffer.poll())!= null ; ){
-				commands.write(command);
-			}
+			boolean processComplete = false;
+			while(!processComplete && selector.select() > 0){
+				Iterator iterator = selector.selectedKeys().iterator();
+				while(iterator.hasNext()){
+					SelectionKey key = (SelectionKey)iterator.next();
+					iterator.remove();
+					
+					if(key.isWritable()){
+						SocketChannel channel = (SocketChannel)key.channel();
+						final ByteArrayOutputStream buf = new ByteArrayOutputStream();
+						for(byte[] command ; (command = commandBuffer.poll()) != null ; ){
+							buf.write(command);
+						}
+						channel.register(selector, SelectionKey.OP_READ);
 
-//			os = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream(), executeBufferSize));
-			is = socket.getInputStream();
+						ByteBuffer wb = ByteBuffer.wrap(buf.toByteArray());
+						while(wb.remaining()>0){
+							channel.write(wb);
+						}
+					}else if(key.isReadable()){
+						ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+						int readSize = 0;
+						
+						ByteBuffer rb = ByteBuffer.allocate(executeBufferSize);
+						rb.clear();
+						for(int size = 0 ; (size = socket.read(rb)) > 0; ){
+							currentResultSize += size;
+							readSize += size;
+							rb.flip();
+							buffer.write(rb.array(), 0, size);
+							rb.position(0);
+							rb.clear();
+							if(size < executeBufferSize)
+								break;
+						}
+						
+						ResponseParser parser = new ResponseParser();
+						if(log.isDebugEnabled()){
+							log.debug(readSize + " / " + buffer.toByteArray().length);
+			//				log.debug(new String(buffer.toByteArray()));
+						}
+						results = parser.parse(buffer.toByteArray());
+						
+						processComplete = true;
+						
+						break;
 
-			ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-			byte[] b = new byte[executeBufferSize];
-			
-//			new Thread(new Runnable(){
-//				@Override
-//				public void run() {
-//					try {
-						OutputStream os =  socket.getOutputStream();
-						os.write(commands.toByteArray());
-						os.flush();
-//					} catch (IOException e) {
-//						log.error(e);
-//					}
-//				}
-				
-//			}).start();
-			
-			int totalSize = 0;
-			for(int size = 0 ; (size = is.read(b)) > 0 ; ){
-				totalSize += size;
-				buffer.write(b, 0, size);
-				if(size < executeBufferSize)
-					break;
+					}
+				}
 			}
-			
-			System.out.println(totalSize);
-			
-			ResponseParser parser = new ResponseParser();
-			results = parser.parse(buffer.toByteArray());
 		}finally{
 			
 		}
@@ -206,6 +227,25 @@ public class HandlerSocket {
 	public void setExecuteBufferSize(int executeBufferSize) {
 		this.executeBufferSize = executeBufferSize;
 	}
+
+	public boolean isBlocking() {
+		return isBlocking;
+	}
+
+	public void setBlocking(boolean isBlocking) {
+		this.isBlocking = isBlocking;
+	}
+
+	public boolean isTcpNoDelay() {
+		return tcpNoDelay;
+	}
+
+	public void setTcpNoDelay(boolean tcpNoDelay) {
+		this.tcpNoDelay = tcpNoDelay;
+	}
+
+
+
 
 
 
@@ -488,7 +528,7 @@ public class HandlerSocket {
 				HandlerSocketResult result = new HandlerSocketResult();
 				int status = data[i] - 0x30 ; i++; if(i >= data.length) break;
 				if(data[i] != 0x09)
-					throw new RuntimeException();//TODO
+					throw new RuntimeException(); //TOOD
 				i++; if(i >= data.length) break;//0x09
 				int fieldNum = data[i] - 0x30 ; i++; if(i >= data.length) break;
 				
