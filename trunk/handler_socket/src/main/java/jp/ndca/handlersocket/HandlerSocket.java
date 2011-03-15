@@ -38,8 +38,10 @@ public class HandlerSocket {
 	private int sendBufferSize = SOCKET_BUFFER_SIZE;
 	private int receiveBufferSize = SOCKET_BUFFER_SIZE;
 	private int executeBufferSize = EXECUTE_BUFFER_SIZE;
-	private boolean isBlocking = false;//Blockingモードで動作するかどうか。trueはBlocking/falseはNon-Blocking
+	private boolean blocking = false;//Blockingモードで動作するかどうか。trueはBlocking/falseはNon-Blocking
 	private boolean tcpNoDelay = true;
+	private boolean reuseAddress = false;
+	private boolean hardClose = false; //hard closeをするかどうか。falseの場合はデフォルト値（ソケットはすぐには破壊されない）。trueの場合は即廃棄。
 
 	SocketChannel socket;
 	Selector selector;
@@ -106,11 +108,15 @@ public class HandlerSocket {
 		
 		selector = Selector.open();
 		socket = SocketChannel.open();
-		socket.configureBlocking(isBlocking);
+		socket.configureBlocking(blocking);
 		socket.socket().setReceiveBufferSize(receiveBufferSize);
 		socket.socket().setSendBufferSize(sendBufferSize);
 		socket.socket().setSoTimeout(timeout);
 		socket.socket().setTcpNoDelay(tcpNoDelay);
+		socket.socket().setReuseAddress(reuseAddress);
+		if(hardClose){
+			socket.socket().setSoLinger(true, 0);
+		}
 
 		socket.connect(new InetSocketAddress(address, port));
 		while(!socket.finishConnect()){}
@@ -149,12 +155,13 @@ public class HandlerSocket {
 							channel.write(wb);
 						}
 					}else if(key.isReadable()){
+						SocketChannel channel = (SocketChannel)key.channel();
 						ByteArrayOutputStream buffer = new ByteArrayOutputStream();
 						int readSize = 0;
 						
 						ByteBuffer rb = ByteBuffer.allocate(executeBufferSize);
 						rb.clear();
-						for(int size = 0 ; (size = socket.read(rb)) > 0; ){
+						for(int size = 0 ; (size = channel.read(rb)) > 0; ){
 							currentResultSize += size;
 							readSize += size;
 							rb.flip();
@@ -191,7 +198,20 @@ public class HandlerSocket {
 	 * @throws IOException
 	 */
 	public void close() throws IOException{
+		socket.socket().close();
 		socket.close();
+		try {
+			Iterator itr = selector.keys().iterator();
+			while(itr.hasNext()){
+				SelectionKey key = (SelectionKey)itr.next();
+				key.channel().close();
+				key.cancel();
+			}
+		} catch(IOException e) { 
+			throw e;
+		}
+		selector.close();
+
 	}
 	
 	public int getTimeout() {
@@ -232,6 +252,22 @@ public class HandlerSocket {
 
 	public void setTcpNoDelay(boolean tcpNoDelay) {
 		this.tcpNoDelay = tcpNoDelay;
+	}
+
+	public boolean isHardClose() {
+		return hardClose;
+	}
+
+	public void setHardClose(boolean hardClose) {
+		this.hardClose = hardClose;
+	}
+
+	public boolean isReuseAddress() {
+		return reuseAddress;
+	}
+
+	public void setReuseAddress(boolean reuseAddress) {
+		this.reuseAddress = reuseAddress;
 	}
 
 
